@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Ortam değişkenleri (güvenlik)
+.env
+.env.*
+
+# Test ve dokümantasyon
+tests/
+docs/
+*.md
+LICENSE
+
+# Geçici dosyalar
+tmp/
+temp/
+*.log
