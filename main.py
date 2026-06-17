@@ -204,10 +204,18 @@ def process_video_task(job_id: str, temp_dir: str, video_input: str, ext: str, o
         _update_job(job_id, 2, "AI sesleri metne döküyor...")
         transcription = _transcribe_audio(audio_path)
 
-        segments = [{"start": getattr(s, 'start', 0), "end": getattr(s, 'end', 0), "text": getattr(s, 'text', '')} 
-                   for s in getattr(transcription, 'segments', [])]
-        words = [{"word": getattr(w, 'word', ''), "start": getattr(w, 'start', 0), "end": getattr(w, 'end', 0)} 
-                for w in getattr(transcription, 'words', [])]
+        def safe_get(obj, key, default):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        raw_segments = safe_get(transcription, 'segments', [])
+        segments = [{"start": safe_get(s, 'start', 0), "end": safe_get(s, 'end', 0), "text": safe_get(s, 'text', '')} 
+                   for s in raw_segments]
+
+        raw_words = safe_get(transcription, 'words', [])
+        words = [{"word": safe_get(w, 'word', ''), "start": safe_get(w, 'start', 0), "end": safe_get(w, 'end', 0)} 
+                for w in raw_words]
 
         if not segments:
             raise ValueError("Videoda konuşma algılanamadı.")
@@ -227,7 +235,7 @@ def process_video_task(job_id: str, temp_dir: str, video_input: str, ext: str, o
             with open(srt_path, "r", encoding="utf-8") as f:
                 srt_content = f.read()
 
-        transcript_text = getattr(transcription, 'text', '')
+        transcript_text = safe_get(transcription, 'text', '')
 
         JOBS[job_id].update({
             "status": "completed",
