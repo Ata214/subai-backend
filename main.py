@@ -207,10 +207,13 @@ def _translate_segments(segments: list, target_language: str) -> list:
     
     try:
         content = response.choices[0].message.content.strip()
-        if content.startswith("```json"): content = content[7:]
-        if content.startswith("```"): content = content[3:]
-        if content.endswith("```"): content = content[:-3]
-        content = content.strip()
+        import re
+        match = re.search(r'\[.*\]', content, re.DOTALL)
+        if match:
+            content = match.group(0)
+        else:
+            raise ValueError("LLM yanıtında JSON dizisi bulunamadı.")
+            
         translated_texts = json.loads(content)
         
         new_words = []
@@ -261,8 +264,17 @@ def process_video_task(job_id: str, temp_dir: str, video_input: str, ext: str, o
         # 150ms erken başlatma (offset)
         offset = 0.15
         
-        segments = [{"start": max(0, safe_get(s, 'start', 0) - offset), "end": max(0, safe_get(s, 'end', 0) - offset), "text": safe_get(s, 'text', '')} 
-                   for s in raw_segments]
+        segments = []
+        for s in raw_segments:
+            text = safe_get(s, 'text', '').strip()
+            # Müzik/sessizlik halüsinasyonlarını filtrele
+            if not text or (text.startswith('[') and text.endswith(']')) or (text.startswith('(') and text.endswith(')')):
+                continue
+            segments.append({
+                "start": max(0, safe_get(s, 'start', 0) - offset),
+                "end": max(0, safe_get(s, 'end', 0) - offset),
+                "text": text
+            })
 
         raw_words = safe_get(transcription, 'words', [])
         words = [{"word": safe_get(w, 'word', ''), "start": max(0, safe_get(w, 'start', 0) - offset), "end": max(0, safe_get(w, 'end', 0) - offset)} 
@@ -275,9 +287,9 @@ def process_video_task(job_id: str, temp_dir: str, video_input: str, ext: str, o
         detected_lang = safe_get(transcription, 'language', 'auto')
         logger.info(f"[{job_id}] Algılanan dil: {detected_lang}, İstenen dil: {language}")
         
-        # Auto değilse ve diller uyuşmuyorsa çeviri yap
-        if language != "auto" and not detected_lang.startswith(language.split('-')[0]):
-            _update_job(job_id, 3, "Altyazılar çevriliyor...")
+        # Auto değilse her zaman çeviri modunu çalıştır (kullanıcının seçtiği dile zorlamak için)
+        if language != "auto":
+            _update_job(job_id, 3, f"Altyazılar çevriliyor ({language})...")
             new_words = _translate_segments(segments, language)
             if new_words:
                 words = new_words
