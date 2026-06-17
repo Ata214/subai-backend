@@ -201,7 +201,7 @@ def _translate_segments(segments: list, target_language: str) -> list:
             {"role": "system", "content": "You are a professional translator. You only output valid JSON arrays."},
             {"role": "user", "content": prompt}
         ],
-        model="llama3-8b-8192",
+        model="llama-3.1-8b-instant",
         temperature=0,
     )
     
