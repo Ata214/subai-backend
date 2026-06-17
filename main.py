@@ -17,7 +17,7 @@ import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from groq import Groq
@@ -188,7 +188,54 @@ def _hardcode_subtitles(video_path: str, ass_path: str, output_path: str) -> Non
 # Background Task: Video İşleme
 # ===========================================================================
 
-def process_video_task(job_id: str, temp_dir: str, video_input: str, ext: str, original_filename: str):
+def _translate_segments(segments: list, target_language: str) -> list:
+    """Groq Llama3 ile segment metinlerini çevirir ve karaoke için pseudo-kelimeler üretir."""
+    api_key = os.environ.get("GROQ_API_KEY")
+    client = Groq(api_key=api_key)
+    texts = [seg["text"] for seg in segments]
+    
+    prompt = f"Translate the following JSON array of strings into {target_language}. Return ONLY a valid JSON array of strings in the exact same order. Do not add any markdown formatting, code blocks, or explanations. Just the raw JSON array.\n\nJSON: {json.dumps(texts)}"
+    
+    response = client.chat.completions.create(
+        messages=[
+            {"role": "system", "content": "You are a professional translator. You only output valid JSON arrays."},
+            {"role": "user", "content": prompt}
+        ],
+        model="llama3-8b-8192",
+        temperature=0,
+    )
+    
+    try:
+        content = response.choices[0].message.content.strip()
+        if content.startswith("```json"): content = content[7:]
+        if content.startswith("```"): content = content[3:]
+        if content.endswith("```"): content = content[:-3]
+        content = content.strip()
+        translated_texts = json.loads(content)
+        
+        new_words = []
+        for i, seg in enumerate(segments):
+            if i < len(translated_texts):
+                seg["text"] = translated_texts[i]
+                t_words = translated_texts[i].split()
+                total_duration = seg["end"] - seg["start"]
+                total_chars = sum(len(w) for w in t_words)
+                
+                current_time = seg["start"]
+                for w in t_words:
+                    word_duration = total_duration * (len(w) / max(1, total_chars))
+                    new_words.append({
+                        "word": w,
+                        "start": current_time,
+                        "end": current_time + word_duration
+                    })
+                    current_time += word_duration
+        return new_words
+    except Exception as e:
+        logger.error(f"Çeviri hatası: {e}")
+        return None
+
+def process_video_task(job_id: str, temp_dir: str, video_input: str, ext: str, original_filename: str, language: str = "auto"):
     """Arka planda videoyu işleyen ana fonksiyon."""
     try:
         audio_path = os.path.join(temp_dir, "audio.wav")
@@ -210,23 +257,38 @@ def process_video_task(job_id: str, temp_dir: str, video_input: str, ext: str, o
             return getattr(obj, key, default)
 
         raw_segments = safe_get(transcription, 'segments', [])
-        segments = [{"start": safe_get(s, 'start', 0), "end": safe_get(s, 'end', 0), "text": safe_get(s, 'text', '')} 
+        
+        # 150ms erken başlatma (offset)
+        offset = 0.15
+        
+        segments = [{"start": max(0, safe_get(s, 'start', 0) - offset), "end": max(0, safe_get(s, 'end', 0) - offset), "text": safe_get(s, 'text', '')} 
                    for s in raw_segments]
 
         raw_words = safe_get(transcription, 'words', [])
-        words = [{"word": safe_get(w, 'word', ''), "start": safe_get(w, 'start', 0), "end": safe_get(w, 'end', 0)} 
+        words = [{"word": safe_get(w, 'word', ''), "start": max(0, safe_get(w, 'start', 0) - offset), "end": max(0, safe_get(w, 'end', 0) - offset)} 
                 for w in raw_words]
 
         if not segments:
             raise ValueError("Videoda konuşma algılanamadı.")
 
+        # Çeviri Gerekli mi?
+        detected_lang = safe_get(transcription, 'language', 'auto')
+        logger.info(f"[{job_id}] Algılanan dil: {detected_lang}, İstenen dil: {language}")
+        
+        # Auto değilse ve diller uyuşmuyorsa çeviri yap
+        if language != "auto" and not detected_lang.startswith(language.split('-')[0]):
+            _update_job(job_id, 3, "Altyazılar çevriliyor...")
+            new_words = _translate_segments(segments, language)
+            if new_words:
+                words = new_words
+
         # 3. Altyazı Oluşturma
-        _update_job(job_id, 3, "Karaoke altyazıları hesaplıyorum...")
+        _update_job(job_id, 4, "Karaoke altyazıları hesaplıyorum...")
         _generate_srt(segments, srt_path)
         _generate_ass_karaoke(segments, words, ass_path)
 
         # 4. Videoya Gömme
-        _update_job(job_id, 4, "Altyazılar videoya gömülüyor (Bu biraz sürebilir)...")
+        _update_job(job_id, 5, "Altyazılar videoya gömülüyor (Bu biraz sürebilir)...")
         _hardcode_subtitles(video_input, ass_path, video_output)
 
         # 5. Tamamlama
@@ -239,7 +301,7 @@ def process_video_task(job_id: str, temp_dir: str, video_input: str, ext: str, o
 
         JOBS[job_id].update({
             "status": "completed",
-            "step": 5,
+            "step": 6,
             "message": "İşlem tamamlandı! 🎉",
             "video_output": video_output,
             "srt_content": srt_content,
@@ -263,7 +325,11 @@ async def health_check():
     return JSONResponse(content={"status": "healthy"})
 
 @app.post("/api/transcribe")
-async def start_transcription(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def start_transcription(
+    background_tasks: BackgroundTasks, 
+    file: UploadFile = File(...),
+    language: str = Form("auto")
+):
     """Videoyu yükler ve işlemi arka planda başlatır."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="Dosya adı belirtilmedi.")
@@ -291,7 +357,7 @@ async def start_transcription(background_tasks: BackgroundTasks, file: UploadFil
                 f.write(chunk)
                 
         # Arka plan görevini başlat
-        background_tasks.add_task(process_video_task, job_id, temp_dir, video_input, ext, file.filename)
+        background_tasks.add_task(process_video_task, job_id, temp_dir, video_input, ext, file.filename, language)
         
         return JSONResponse(content={"job_id": job_id, "message": "İşlem başlatıldı."})
 
